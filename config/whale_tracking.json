@@ -1,0 +1,171 @@
+{
+  "whales": {
+    "tier_1_titans": {
+      "description": "Multi-trillion dollar asset managers - any move is significant",
+      "institutions": [
+        {
+          "name": "BlackRock",
+          "cik": "0001364742",
+          "aum": "11.55T",
+          "priority": "CRITICAL",
+          "crypto_friendly": true,
+          "notes": "Largest asset manager, Bitcoin ETF leader, Larry Fink converted"
+        },
+        {
+          "name": "Vanguard", 
+          "cik": "0000102909",
+          "aum": "10.4T",
+          "priority": "CRITICAL", 
+          "crypto_friendly": false,
+          "notes": "Blocks Bitcoin ETFs but huge MicroStrategy holder"
+        },
+        {
+          "name": "State Street",
+          "cik": "0000093751", 
+          "aum": "4.7T",
+          "priority": "HIGH",
+          "crypto_friendly": true,
+          "notes": "Partnered with Galaxy Digital for crypto ETFs"
+        },
+        {
+          "name": "Fidelity",
+          "cik": "0000315066",
+          "aum": "4.5T",
+          "priority": "HIGH",
+          "crypto_friendly": true,
+          "notes": "Expanding retail crypto access, retirement accounts"
+        }
+      ]
+    },
+    "tier_2_hedge_funds": {
+      "description": "Legendary hedge funds with proven track records",
+      "institutions": [
+        {
+          "name": "Citadel",
+          "cik": "0001423053",
+          "aum": "65B-397B",
+          "priority": "HIGH",
+          "crypto_friendly": true,
+          "notes": "Ken Griffin pivoted from crypto skeptic to market maker"
+        },
+        {
+          "name": "Renaissance Technologies",
+          "cik": "0001037389", 
+          "aum": "110B",
+          "priority": "CRITICAL",
+          "crypto_friendly": true,
+          "notes": "30% returns 2024, quant strategies include crypto analysis"
+        },
+        {
+          "name": "Point72",
+          "cik": "0001603466",
+          "aum": "35B",
+          "priority": "HIGH", 
+          "crypto_friendly": true,
+          "notes": "Steve Cohen fully converted, $77.5M Bitcoin ETF position"
+        },
+        {
+          "name": "Bridgewater",
+          "cik": "0001350694",
+          "aum": "124B-160B",
+          "priority": "CRITICAL",
+          "crypto_friendly": false,
+          "notes": "World's largest hedge fund, macro focus"
+        },
+        {
+          "name": "Coatue Management",
+          "cik": "0001380321",
+          "aum": "25B",
+          "priority": "MEDIUM",
+          "crypto_friendly": true, 
+          "notes": "Bitcoin target $5.2T market cap by 2030"
+        }
+      ]
+    },
+    "tier_3_crypto_natives": {
+      "description": "Crypto-focused or high-conviction individual investors",
+      "individuals": [
+        {
+          "name": "Michael Saylor",
+          "company": "MicroStrategy",
+          "ticker": "MSTR",
+          "priority": "CRITICAL",
+          "notes": "601,550 BTC, turned company into Bitcoin treasury"
+        },
+        {
+          "name": "Cathie Wood", 
+          "company": "ARK Invest",
+          "funds": ["ARKK", "ARKB", "ARKW"],
+          "priority": "HIGH",
+          "notes": "Bitcoin target $2.4M by 2030, daily holdings transparency"
+        },
+        {
+          "name": "Bill Miller",
+          "company": "Miller Value Partners", 
+          "priority": "MEDIUM",
+          "notes": "50% personal wealth in Bitcoin since $350"
+        },
+        {
+          "name": "Paul Tudor Jones",
+          "company": "Tudor Investment Corp",
+          "cik": "0000109211",
+          "priority": "HIGH", 
+          "notes": "Advocates Bitcoin + gold for inflation protection"
+        }
+      ]
+    }
+  },
+  "tracking_thresholds": {
+    "tier_1_titans": {
+      "min_position_value": 1000000,
+      "min_change_percent": 0.1,
+      "confidence_multiplier": 1.0
+    },
+    "tier_2_hedge_funds": {
+      "min_position_value": 5000000,
+      "min_change_percent": 1.0, 
+      "confidence_multiplier": 0.9
+    },
+    "tier_3_crypto_natives": {
+      "min_position_value": 1000000,
+      "min_change_percent": 2.0,
+      "confidence_multiplier": 0.8
+    }
+  },
+  "manual_high_conviction": {
+    "description": "AI trend and high-conviction plays regardless of whale activity",
+    "symbols": [
+      {
+        "symbol": "PLTR",
+        "reason": "AI trend, government contracts, free money",
+        "weight": 0.15
+      },
+      {
+        "symbol": "NVDA", 
+        "reason": "AI chip leader, obvious play",
+        "weight": 0.15
+      },
+      {
+        "symbol": "MSFT",
+        "reason": "OpenAI partnership, Azure AI dominance", 
+        "weight": 0.10
+      }
+    ]
+  },
+  "crypto_allocation": {
+    "description": "Crypto as side play - lower priority",
+    "max_allocation_percent": 15,
+    "symbols": [
+      {
+        "symbol": "BTCUSD",
+        "reason": "Digital gold, institutional adoption",
+        "weight": 0.10
+      },
+      {
+        "symbol": "ETHUSD", 
+        "reason": "DeFi platform, smart contracts",
+        "weight": 0.05
+      }
+    ]
+  }
+}

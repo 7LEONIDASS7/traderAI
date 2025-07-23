@@ -47,7 +47,90 @@ class MemoryStorage:
         self.new_path.mkdir(parents=True, exist_ok=True)
         self.cur_path.mkdir(parents=True, exist_ok=True)
         self.index_path.mkdir(parents=True, exist_ok=True) # Create index dir too
+        
+        # Initialize indexing system for performance
+        self.metadata_index_file = self.cur_path / "metadata_index.json"
+        self.content_index_file = self.cur_path / "content_index.json"
+        self._load_indexes()
+        
         log.info(f"MemoryStorage initialized. Memdir root: {self.memdir_root}")
+
+    def _load_indexes(self):
+        """Load or initialize the indexing system for faster queries."""
+        try:
+            # Load metadata index (filename -> parsed info)
+            if self.metadata_index_file.exists():
+                with open(self.metadata_index_file, 'r') as f:
+                    self.metadata_index = json.load(f)
+                log.debug(f"Loaded metadata index with {len(self.metadata_index)} entries")
+            else:
+                self.metadata_index = {}
+                log.debug("Initialized empty metadata index")
+                
+            # Load content index (keyword -> list of filenames)  
+            if self.content_index_file.exists():
+                with open(self.content_index_file, 'r') as f:
+                    self.content_index = json.load(f)
+                log.debug(f"Loaded content index with {len(self.content_index)} keywords")
+            else:
+                self.content_index = {}
+                log.debug("Initialized empty content index")
+                
+        except Exception as e:
+            log.warning(f"Failed to load indexes, initializing empty: {e}")
+            self.metadata_index = {}
+            self.content_index = {}
+
+    def _save_indexes(self):
+        """Save indexes to disk for persistence."""
+        try:
+            # Save metadata index
+            with open(self.metadata_index_file, 'w') as f:
+                json.dump(self.metadata_index, f, default=str)
+                
+            # Save content index  
+            with open(self.content_index_file, 'w') as f:
+                json.dump(self.content_index, f)
+                
+            log.debug("Saved memory indexes to disk")
+        except Exception as e:
+            log.warning(f"Failed to save indexes: {e}")
+
+    def _update_indexes(self, filename: str, entry: MemoryEntry, remove: bool = False):
+        """Update indexes when files are added/removed."""
+        try:
+            if remove:
+                # Remove from indexes
+                if filename in self.metadata_index:
+                    del self.metadata_index[filename]
+                    
+                # Remove from content index
+                for keyword_list in self.content_index.values():
+                    if filename in keyword_list:
+                        keyword_list.remove(filename)
+                        
+            else:
+                # Add/update metadata index
+                parsed_info = self._parse_filename(filename)
+                if parsed_info:
+                    # Convert datetime to string for JSON serialization
+                    index_entry = parsed_info.copy()
+                    index_entry['timestamp_dt'] = index_entry['timestamp_dt'].isoformat()
+                    self.metadata_index[filename] = index_entry
+                    
+                # Update content index
+                content_text = entry.model_dump_json().lower()
+                words = set(content_text.split())  # Simple word extraction
+                
+                for word in words:
+                    if len(word) > 2:  # Only index meaningful words
+                        if word not in self.content_index:
+                            self.content_index[word] = []
+                        if filename not in self.content_index[word]:
+                            self.content_index[word].append(filename)
+                            
+        except Exception as e:
+            log.warning(f"Failed to update indexes for {filename}: {e}")
 
     def _generate_unique_id(self) -> str:
         """Generates a unique ID component for the filename."""
@@ -70,21 +153,53 @@ class MemoryStorage:
         return filename
 
     def _parse_filename(self, filename: str) -> Optional[Dict[str, Any]]:
-        """Parses a Memdir filename into its components."""
-        match = FILENAME_REGEX.match(filename)
-        if match:
-            # Groups: 1=timestamp_ns, 2=unique_id, 3=hostname, 4=flags(optional)
-            ts_ns, unique_id, hostname, flags_str = match.groups()
-            return {
-                "timestamp_ns": int(ts_ns),
-                "unique_id": unique_id,
-                "hostname": hostname,
-                "size": None, # Explicitly add size as None as it's not captured by regex
-                "flags": flags_str if flags_str is not None else "", # Handle case where flags group doesn't match
-                "timestamp_dt": datetime.fromtimestamp(int(ts_ns) / 1e9, tz=timezone.utc)
-            }
-        else: # Correctly indented else block
-            log.warning(f"Could not parse filename: {filename}")
+        """Parses a Memdir filename into its components with robust error handling."""
+        try:
+            match = FILENAME_REGEX.match(filename)
+            if match:
+                # Groups: 1=timestamp_ns, 2=unique_id, 3=hostname, 4=flags(optional)
+                ts_ns, unique_id, hostname, flags_str = match.groups()
+                
+                # Validate timestamp is a valid integer
+                try:
+                    timestamp_ns = int(ts_ns)
+                    timestamp_dt = datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc)
+                except (ValueError, OSError) as e:
+                    log.warning(f"Invalid timestamp in filename {filename}: {e}")
+                    return None
+                
+                return {
+                    "timestamp_ns": timestamp_ns,
+                    "unique_id": unique_id,
+                    "hostname": hostname,
+                    "size": None, # Explicitly add size as None as it's not captured by regex
+                    "flags": flags_str if flags_str is not None else "", # Handle case where flags group doesn't match
+                    "timestamp_dt": timestamp_dt
+                }
+            else:
+                # Try relaxed parsing for slightly malformed filenames
+                parts = filename.split('.')
+                if len(parts) >= 3 and parts[0].isdigit():
+                    try:
+                        timestamp_ns = int(parts[0])
+                        timestamp_dt = datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc)
+                        log.info(f"Using relaxed parsing for filename: {filename}")
+                        return {
+                            "timestamp_ns": timestamp_ns,
+                            "unique_id": parts[1] if len(parts) > 1 else "unknown",
+                            "hostname": parts[2] if len(parts) > 2 else "unknown", 
+                            "size": None,
+                            "flags": "",
+                            "timestamp_dt": timestamp_dt
+                        }
+                    except (ValueError, OSError, IndexError):
+                        pass
+                
+                log.warning(f"Could not parse filename with either strict or relaxed parsing: {filename}")
+                return None
+                
+        except Exception as e:
+            log.error(f"Unexpected error parsing filename {filename}: {e}")
             return None
 
     def save_memory(self, entry: MemoryEntry) -> str:
@@ -305,12 +420,11 @@ class MemoryStorage:
         flags_include: Optional[str] = None,
         flags_exclude: Optional[str] = None,
         max_results: Optional[int] = None,
-        content_keywords: Optional[List[str]] = None # Basic keyword search (slow)
+        content_keywords: Optional[List[str]] = None
         ) -> List[Tuple[str, Dict[str, Any]]]: # Returns list of (filename, parsed_info)
         """
-        Queries memory files in the 'cur' directory based on criteria.
-        NOTE: This is a basic implementation scanning filenames. Content search is slow.
-              Consider implementing proper indexing for performance.
+        Fast indexed query of memory files in the 'cur' directory.
+        Uses pre-built indexes for performance instead of scanning all files.
 
         Args:
             time_start: Minimum timestamp (inclusive).
@@ -318,74 +432,122 @@ class MemoryStorage:
             flags_include: String of flags that MUST be present.
             flags_exclude: String of flags that MUST NOT be present.
             max_results: Maximum number of results to return.
-            content_keywords: List of keywords to search for in the file content (SLOW).
+            content_keywords: List of keywords to search for in the file content (FAST).
 
         Returns:
             A list of tuples, each containing (filename, parsed_filename_info).
             Sorted by timestamp descending (most recent first).
         """
-        log.debug(f"Querying memories in 'cur': start={time_start}, end={time_end}, incl='{flags_include}', excl='{flags_exclude}', keywords='{content_keywords}'")
+        log.debug(f"Indexed query: start={time_start}, end={time_end}, incl='{flags_include}', excl='{flags_exclude}', keywords='{content_keywords}'")
+        
+        try:
+            # Start with all filenames from metadata index
+            candidate_filenames = set(self.metadata_index.keys())
+            
+            # Filter by content keywords first (most selective)
+            if content_keywords:
+                keyword_matches = None
+                for keyword in content_keywords:
+                    # Find files containing this keyword
+                    files_with_keyword = set(self.content_index.get(keyword.lower(), []))
+                    if keyword_matches is None:
+                        keyword_matches = files_with_keyword
+                    else:
+                        # Intersection - files must contain ALL keywords
+                        keyword_matches = keyword_matches.intersection(files_with_keyword)
+                        
+                candidate_filenames = candidate_filenames.intersection(keyword_matches)
+                log.debug(f"Content keyword filter reduced candidates to {len(candidate_filenames)} files")
+
+            # Apply other filters using cached metadata
+            results = []
+            for filename in candidate_filenames:
+                metadata = self.metadata_index[filename]
+                
+                # Parse timestamp from index (convert back from ISO string)
+                file_dt = datetime.fromisoformat(metadata['timestamp_dt'])
+                
+                # Filter by timestamp
+                if time_start and file_dt < time_start:
+                    continue
+                if time_end and file_dt >= time_end:
+                    continue
+
+                # Filter by flags  
+                file_flags = set(metadata.get("flags", ""))
+                if flags_include and not set(flags_include).issubset(file_flags):
+                    continue
+                if flags_exclude and not set(flags_exclude).isdisjoint(file_flags):
+                    continue
+
+                # Convert metadata back to expected format
+                result_metadata = metadata.copy()
+                result_metadata['timestamp_dt'] = file_dt  # Convert back to datetime
+                results.append((filename, result_metadata))
+
+            # Sort by timestamp descending
+            results.sort(key=lambda x: x[1]['timestamp_dt'], reverse=True)
+            
+            # Apply max_results limit
+            if max_results is not None:
+                results = results[:max_results]
+
+            log.debug(f"Indexed query completed. Found {len(results)} results from {len(self.metadata_index)} indexed files.")
+            return results
+
+        except Exception as e:
+             log.error(f"Error during indexed memory query: {e}", exc_info=True)
+             # Fallback to original method if indexing fails
+             log.warning("Falling back to slow file scanning method")
+             return self._query_memories_fallback(time_start, time_end, flags_include, flags_exclude, max_results, content_keywords)
+
+    def _query_memories_fallback(self, time_start, time_end, flags_include, flags_exclude, max_results, content_keywords):
+        """Fallback to original slow method if indexing fails."""
+        log.debug("Using fallback file scanning method")
         results = []
         files_scanned = 0
 
         try:
-            # Iterate through files in 'cur' directory, sorting by name might help slightly
-            # but true chronological order requires parsing timestamps.
-            # Listing and then sorting might be memory intensive for huge dirs.
-            # For now, list all and sort in memory.
             all_filenames = self.list_files(CUR_DIR)
-            # Sort filenames primarily by timestamp (first part) descending
             all_filenames.sort(key=lambda f: int(f.split('.', 1)[0]) if '.' in f else 0, reverse=True)
 
             for filename in all_filenames:
                 files_scanned += 1
                 parsed_info = self._parse_filename(filename)
                 if not parsed_info:
-                    continue # Skip unparseable filenames
+                    continue
 
-                # --- Filter by Timestamp ---
                 file_dt = parsed_info['timestamp_dt']
                 if time_start and file_dt < time_start:
                     continue
                 if time_end and file_dt >= time_end:
                     continue
 
-                # --- Filter by Flags ---
                 file_flags = set(parsed_info.get("flags", ""))
                 if flags_include and not set(flags_include).issubset(file_flags):
                     continue
                 if flags_exclude and not set(flags_exclude).isdisjoint(file_flags):
                     continue
 
-                # --- Filter by Content Keywords (SLOW) ---
                 if content_keywords:
                     try:
-                        # Read the content only if other filters pass
                         entry = self.read_memory(CUR_DIR, filename)
-                        content_str = entry.model_dump_json() # Search in the JSON string
+                        content_str = entry.model_dump_json()
                         if not all(keyword.lower() in content_str.lower() for keyword in content_keywords):
                             continue
-                    except MemdirIOError as e:
-                        log.warning(f"Could not read content of {filename} for keyword search: {e}")
-                        continue # Skip file if content cannot be read
+                    except MemdirIOError:
+                        continue
 
-                # If all filters pass, add to results
                 results.append((filename, parsed_info))
-
                 if max_results is not None and len(results) >= max_results:
-                    break # Stop early if max results reached
+                    break
 
-            log.debug(f"Query finished. Scanned {files_scanned} files, found {len(results)} results.")
-            # Results are already sorted by timestamp descending due to initial sort
+            log.debug(f"Fallback query: scanned {files_scanned} files, found {len(results)} results")
             return results
 
-        except MemdirIOError as e:
-             log.error(f"IO Error during memory query: {e}", exc_info=True)
-             raise MemoryQueryError(f"IO Error during query: {e}") from e
         except Exception as e:
-             log.error(f"Unexpected error during memory query: {e}", exc_info=True)
-             raise MemoryQueryError(f"Unexpected error during query: {e}") from e
-
+            log.error(f"Fallback query failed: {e}", exc_info=True)
+            raise MemoryQueryError(f"Both indexed and fallback queries failed: {e}") from e
 
     def prune_memories(self, max_age_days: Optional[int] = None, max_count: Optional[int] = None) -> Tuple[int, int]:
         """
@@ -451,14 +613,35 @@ class MemoryStorage:
 
             # --- Perform Deletion ---
             total_deleted = 0
+            successfully_deleted = []
             for filename in files_to_delete:
                 filepath = self.cur_path / filename # Use Path object
                 try:
                     filepath.unlink() # Use Path.unlink()
                     log.debug(f"Pruned memory file: {filepath}")
                     total_deleted += 1
+                    successfully_deleted.append(filename)
                 except OSError as e:
                     log.error(f"Error pruning file {filepath}: {e}", exc_info=True)
+
+            # --- Update indexes to remove deleted files ---
+            if successfully_deleted:
+                try:
+                    for filename in successfully_deleted:
+                        # Remove from metadata index
+                        if filename in self.metadata_index:
+                            del self.metadata_index[filename]
+                        
+                        # Remove from content index
+                        for keyword_list in self.content_index.values():
+                            if filename in keyword_list:
+                                keyword_list.remove(filename)
+                    
+                    # Save updated indexes
+                    self._save_indexes()
+                    log.debug(f"Updated indexes after pruning {len(successfully_deleted)} files")
+                except Exception as index_err:
+                    log.warning(f"Failed to update indexes after pruning: {index_err}")
 
             log.info(f"Memory pruning complete. Total files deleted: {total_deleted} (Age: {deleted_by_age}, Count: {deleted_by_count})")
             return deleted_by_age, deleted_by_count

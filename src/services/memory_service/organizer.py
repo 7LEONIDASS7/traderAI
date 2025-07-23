@@ -185,6 +185,13 @@ class MemoryOrganizer:
             os.rename(tmp_proc_filepath, cur_filepath)
             log.debug(f"Moved processed file to {cur_filepath}")
 
+            # 7.5. Update indexes for faster queries
+            try:
+                self.storage._update_indexes(cur_filename, entry)
+                self.storage._save_indexes()  # Persist indexes after update
+            except Exception as index_err:
+                log.warning(f"Failed to update indexes for {cur_filename}: {index_err}")
+
             # 8. Delete the original file from 'new'
             try:
                 os.remove(new_filepath)

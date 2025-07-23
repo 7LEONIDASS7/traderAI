@@ -18,9 +18,9 @@ else:
     load_dotenv(override=True)
     # print(f"Warning: {ENV_PATH} not found. Loading from default locations.") # Debug print
     if not os.getenv("ALPACA_API_KEY"): # Check if essential keys are loaded
-         print(f"CRITICAL WARNING: Could not find .env file at {ENV_PATH} and essential environment variables (e.g., ALPACA_API_KEY) are not set.")
-         # Consider raising an exception here if the .env file is strictly required
-         # raise FileNotFoundError(f"Required .env file not found at {ENV_PATH}")
+         error_msg = f"CRITICAL ERROR: Could not find .env file at {ENV_PATH} and essential environment variables (e.g., ALPACA_API_KEY) are not set."
+         print(error_msg)
+         raise FileNotFoundError(error_msg)
 
 
 def get_string(var_name: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
@@ -164,6 +164,16 @@ MEMDIR_ORGANIZER_MODEL = get_string("MEMDIR_ORGANIZER_MODEL", required=True)
 # Orchestration Service - Make required
 MAIN_LOOP_SLEEP_INTERVAL = get_int("MAIN_LOOP_SLEEP_INTERVAL", required=True)
 LIQUIDATE_ON_CLOSE = get_bool("LIQUIDATE_ON_CLOSE", default=False) # Keep default for bool flag
+
+# Institutional Tracking Configuration - FREE SEC EDGAR API
+INSTITUTIONAL_DATA_BASE_URL = get_string("INSTITUTIONAL_DATA_BASE_URL", default="https://data.sec.gov/api/xbrl")
+INSTITUTIONAL_DATA_SOURCE = get_string("INSTITUTIONAL_DATA_SOURCE", default="sec_edgar")
+INSTITUTIONAL_TRACKED_INSTITUTIONS = get_list("INSTITUTIONAL_TRACKED_INSTITUTIONS", default=["BlackRock", "Vanguard", "Berkshire Hathaway"])
+INSTITUTIONAL_MIN_CHANGE_PERCENT = get_float("INSTITUTIONAL_MIN_CHANGE_PERCENT", default=5.0)
+INSTITUTIONAL_MIN_POSITION_VALUE = get_float("INSTITUTIONAL_MIN_POSITION_VALUE", default=100_000_000)
+INSTITUTIONAL_MIN_CONFIDENCE = get_float("INSTITUTIONAL_MIN_CONFIDENCE", default=0.7)
+INSTITUTIONAL_LOOKBACK_QUARTERS = get_int("INSTITUTIONAL_LOOKBACK_QUARTERS", default=2)
+INSTITUTIONAL_UPDATE_FREQUENCY_HOURS = get_int("INSTITUTIONAL_UPDATE_FREQUENCY_HOURS", default=24)
 
 # --- Ensure Log Directory Exists ---
 os.makedirs(LOG_PATH, exist_ok=True)

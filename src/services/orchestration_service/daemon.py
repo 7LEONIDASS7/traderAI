@@ -15,12 +15,14 @@ from ...utils.exceptions import (
 from ...interfaces.brokerage import BrokerageInterface
 from ...interfaces.large_language_model import LLMInterface
 from ...interfaces.notification import NotificationInterface
+from ...interfaces.institutional_data import InstitutionalDataInterface
 from ..memory_service.storage import MemoryStorage
 from ..memory_service.organizer import MemoryOrganizer
 from ..ai_service.processor import AIServiceProcessor
 from ..execution_service.manager import ExecutionServiceManager
 from ..optimization_service.engine import OptimizationEngine
 from ..optimization_service.frequency_analyzer import FrequencyAnalyzer
+from ..institutional_tracking_service.tracker import InstitutionalTracker
 from ...models.memory_entry import MemoryEntry, MemoryEntryType
 
 # --- Constants ---
@@ -45,12 +47,28 @@ class OrchestrationDaemon:
             self.brokerage = BrokerageInterface()
             self.llm = LLMInterface()
             self.notifier = NotificationInterface()
+            self.institutional_data = InstitutionalDataInterface()
 
             # --- Initialize Services ---
             log.info("Initializing services...")
             self.memory_storage = MemoryStorage()
             self.memory_organizer = MemoryOrganizer(self.memory_storage, self.llm)
-            self.ai_processor = AIServiceProcessor(self.llm, self.brokerage, self.memory_storage)
+            
+            # Initialize institutional tracker
+            self.institutional_tracker = InstitutionalTracker(
+                institutional_data=self.institutional_data,
+                llm=self.llm,
+                memory_storage=self.memory_storage
+            )
+            
+            # Initialize AI processor with institutional tracker
+            self.ai_processor = AIServiceProcessor(
+                llm_interface=self.llm,
+                brokerage_interface=self.brokerage,
+                memory_storage=self.memory_storage,
+                institutional_tracker=self.institutional_tracker
+            )
+            
             self.execution_manager = ExecutionServiceManager(self.brokerage, self.memory_storage)
             self.frequency_analyzer = FrequencyAnalyzer(self.memory_storage)
             self.optimization_engine = OptimizationEngine(self.memory_storage, self.llm)
@@ -168,6 +186,39 @@ class OrchestrationDaemon:
             self.notifier.send_notification(f"ERROR: Optimization cycle task failed: {e}", subject="Trading System Error")
             self._log_system_event("Optimization Cycle Run Failed", {"error": str(e)})
 
+    def _run_institutional_analysis(self):
+        """Triggers institutional tracking analysis to update whale following signals."""
+        log.info("Running institutional analysis (whale following)...")
+        try:
+            # Analyze institutional movements for our target symbols
+            symbols = config.DEFAULT_SYMBOLS
+            analysis_result = self.institutional_tracker.analyze_institutional_movements(symbols)
+            
+            # Log results
+            if analysis_result.strong_signals:
+                log.info(f"Institutional analysis completed: {len(analysis_result.strong_signals)} strong signals detected")
+                
+                # Send notification about strong institutional signals
+                signal_summary = []
+                for signal in analysis_result.strong_signals[:3]:  # Top 3 signals
+                    signal_summary.append(f"• {signal.symbol}: {signal.action_recommendation.value} ({signal.confidence:.0%} confidence)")
+                
+                notification_msg = f"🐋 INSTITUTIONAL SIGNALS DETECTED:\n" + "\n".join(signal_summary)
+                self.notifier.send_notification(notification_msg, subject="Whale Following Alert")
+            else:
+                log.info("Institutional analysis completed: No strong signals detected")
+            
+            self._log_system_event("Institutional Analysis Completed", {
+                "total_signals": analysis_result.total_signals,
+                "strong_signals": len(analysis_result.strong_signals),
+                "symbols_analyzed": analysis_result.symbols_analyzed
+            })
+            
+        except Exception as e:
+            log.error(f"Error during institutional analysis: {e}", exc_info=True)
+            self.notifier.send_notification(f"ERROR: Institutional analysis failed: {e}", subject="Trading System Error")
+            self._log_system_event("Institutional Analysis Failed", {"error": str(e)})
+
     def _update_optimal_frequency(self):
         """Calculates and updates the optimal trading frequency."""
         log.info("Updating optimal trading frequency...")
@@ -196,16 +247,29 @@ class OrchestrationDaemon:
         self._last_trade_cycle_time = datetime.now(timezone.utc)
 
         try:
-            # 1. Check Market Status
-            if not self.brokerage.is_market_open():
-                log.info("Trading cycle skipped: Market is closed.")
-                return # Skip cycle if market is closed
+            # 1. Check Market Status (crypto trades 24/7, stocks need market open)
+            portfolio = self.execution_manager.get_current_portfolio(force_refresh=True) # Get portfolio first
+            symbols_to_watch = set(config.DEFAULT_SYMBOLS) | set(portfolio.positions.keys())
+            
+            # Separate crypto and stock symbols
+            crypto_symbols = {s for s in symbols_to_watch if 'USD' in s and len(s) <= 7}  # BTCUSD, ETHUSD, etc.
+            stock_symbols = symbols_to_watch - crypto_symbols
+            
+            # Check if we can trade anything
+            market_open = self.brokerage.is_market_open()
+            if not market_open and not crypto_symbols:
+                log.info("Trading cycle skipped: Market closed and no crypto positions.")
+                return
+                
+            if not market_open and stock_symbols:
+                log.info(f"Market closed - trading crypto only: {crypto_symbols}")
+                symbols_to_watch = crypto_symbols  # Only trade crypto when market closed
 
             # 2. Get Market Data & Portfolio State
             log.debug("Fetching latest market data and portfolio state...")
-            # Decide which symbols to fetch data for (e.g., default symbols + open positions)
-            portfolio = self.execution_manager.get_current_portfolio(force_refresh=True) # Ensure fresh portfolio
-            symbols_to_watch = set(config.DEFAULT_SYMBOLS) | set(portfolio.positions.keys())
+            if not symbols_to_watch:
+                log.info("No symbols to trade this cycle.")
+                return
             market_data = self.brokerage.get_latest_market_data(list(symbols_to_watch))
 
             # 3. Trigger AI Analysis -> Signal Generation
@@ -264,6 +328,12 @@ class OrchestrationDaemon:
         schedule.every(5).minutes.do(self._run_health_checks)
         # Schedule memory organization (e.g., every minute)
         schedule.every(1).minute.do(self._run_memory_organization)
+        # Schedule institutional tracking updates (e.g., daily at 6 AM)
+        if self.institutional_tracker.is_available():
+            schedule.every().day.at("06:00").do(self._run_institutional_analysis)
+            log.info("Scheduled daily institutional analysis at 6:00 AM")
+        else:
+            log.info("Institutional tracking not available - skipping scheduled updates")
         # Schedule optimization cycle (based on config - daily, weekly, etc.)
         if config.OPTIMIZATION_ENABLED:
              schedule_time = "02:00" # Default daily at 2 AM (configure?)

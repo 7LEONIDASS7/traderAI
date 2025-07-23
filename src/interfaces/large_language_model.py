@@ -177,15 +177,24 @@ class LLMInterface:
                     # Handle potential blocks or errors in response
                     if not response.candidates:
                          block_reason = response.prompt_feedback.block_reason if response.prompt_feedback else "Unknown"
-                         log.error(f"Gemini response blocked. Reason: {block_reason}")
+                         log.error(f"Gemini response blocked. Reason: {block_reason}. Full response: {str(response)[:200]}")
                          raise LLMError(f"Gemini response blocked: {block_reason}")
-                    if not hasattr(response.candidates[0].content, 'parts') or not response.candidates[0].content.parts:
-                         finish_reason = response.candidates[0].finish_reason if response.candidates else "Unknown"
-                         log.error(f"Gemini response missing content parts. Finish Reason: {finish_reason}")
+                    
+                    candidate = response.candidates[0]
+                    if not hasattr(candidate.content, 'parts') or not candidate.content.parts:
+                         finish_reason = candidate.finish_reason if candidate else "Unknown"
+                         log.error(f"Gemini response missing content parts. Finish Reason: {finish_reason}. Full response: {str(response)[:200]}")
                          raise LLMError(f"Gemini response missing content. Finish Reason: {finish_reason}")
-
-
-                    content = response.text # Access the combined text directly
+                    
+                    # Additional validation for content type and accessibility
+                    try:
+                        content = response.text # Access the combined text directly
+                        if not content or not isinstance(content, str):
+                            log.error(f"Gemini returned empty or invalid content type: {type(content)}. Response: {str(response)[:200]}")
+                            raise LLMError(f"Gemini returned invalid content: {type(content)}")
+                    except Exception as content_error:
+                        log.error(f"Failed to access Gemini response text: {content_error}. Response: {str(response)[:200]}")
+                        raise LLMError(f"Failed to parse Gemini response: {content_error}")
                     log.info(f"Received response from {selected_model}.")
                     # log.debug(f"Response (first 100 chars): {content[:100]}...")
                     return content.strip()

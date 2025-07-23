@@ -118,9 +118,18 @@ class ExecutionServiceManager:
             qty = risk_amount / price_diff
             log.debug(f"Calculated quantity based on stop loss {signal.stop_loss_price}: {qty}")
         else:
-            # Fallback: Risk amount divided by current price (simpler, less precise risk control)
-            qty = risk_amount / current_price
-            log.warning(f"No stop loss provided for {signal.symbol}. Using simple price-based quantity calculation: {qty}")
+            # Enhanced fallback: Calculate implied stop loss based on symbol type and volatility
+            implied_stop_loss = self._calculate_implied_stop_loss(signal.symbol, current_price, signal.action)
+            if implied_stop_loss:
+                price_diff = abs(current_price - implied_stop_loss)
+                qty = risk_amount / price_diff
+                log.info(f"No stop loss provided for {signal.symbol}. Using implied stop loss {implied_stop_loss} (diff: {price_diff:.2f}): {qty}")
+            else:
+                # Final fallback: Use conservative 2% risk assumption
+                conservative_risk_percent = 0.02  # 2% of current price
+                price_diff = current_price * conservative_risk_percent
+                qty = risk_amount / price_diff
+                log.warning(f"No stop loss provided for {signal.symbol}. Using conservative 2% risk assumption: {qty}")
 
         # Apply position size limits
         max_position_value = config.MAX_POSITION_SIZE
@@ -136,6 +145,36 @@ class ExecutionServiceManager:
              raise OrderValidationError(f"Calculated order quantity is zero or negative for {signal.symbol}.")
 
         return final_qty
+
+    def _calculate_implied_stop_loss(self, symbol: str, current_price: float, action: SignalAction) -> Optional[float]:
+        """Calculate an implied stop loss based on symbol type and market characteristics."""
+        try:
+            # Different risk profiles for different asset types
+            if 'USD' in symbol and len(symbol) <= 7:  # Crypto symbols (BTCUSD, ETHUSD)
+                risk_percent = 0.05  # 5% for crypto (more volatile)
+            elif symbol in ['SPY', 'QQQ', 'IWM', 'DIA']:  # ETFs
+                risk_percent = 0.02  # 2% for ETFs (less volatile)
+            elif symbol in ['PLTR', 'NVDA']:  # High-growth tech (more volatile)
+                risk_percent = 0.04  # 4% for high-growth tech
+            else:  # Regular stocks
+                risk_percent = 0.025  # 2.5% for regular stocks
+            
+            # Calculate stop loss based on action direction
+            if action == SignalAction.BUY:
+                # For buy orders, stop loss is below current price
+                implied_stop = current_price * (1 - risk_percent)
+            elif action == SignalAction.SELL:
+                # For sell orders, stop loss is above current price
+                implied_stop = current_price * (1 + risk_percent)
+            else:
+                return None
+            
+            log.debug(f"Calculated implied stop loss for {symbol} ({action.value}): {implied_stop:.2f} ({risk_percent*100:.1f}% risk)")
+            return implied_stop
+            
+        except Exception as e:
+            log.warning(f"Failed to calculate implied stop loss for {symbol}: {e}")
+            return None
 
 
     def _perform_pre_trade_checks(self, order: Order, portfolio: Portfolio):

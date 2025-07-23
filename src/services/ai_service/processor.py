@@ -15,6 +15,7 @@ from ...interfaces.large_language_model import LLMInterface
 from ...interfaces.brokerage import BrokerageInterface # Needed for context if required by prompt
 from ...interfaces.perplexity import PerplexityInterface # Import Perplexity
 from ..memory_service.storage import MemoryStorage # Direct storage access for now
+from ..institutional_tracking_service.tracker import InstitutionalTracker
 
 # --- Constants ---
 AI_SERVICE_SOURCE = "AIService"
@@ -31,16 +32,20 @@ class AIServiceProcessor:
         llm_interface: LLMInterface,
         brokerage_interface: BrokerageInterface, # Pass brokerage for potential context
         memory_storage: MemoryStorage,
-        perplexity_interface: Optional[PerplexityInterface] = None # Add Perplexity interface
+        perplexity_interface: Optional[PerplexityInterface] = None, # Add Perplexity interface
+        institutional_tracker: Optional[InstitutionalTracker] = None # Add Institutional tracker
     ):
         self.llm = llm_interface
         self.brokerage = brokerage_interface # Store for context if needed
         self.memory_storage = memory_storage
         self.perplexity = perplexity_interface # Store Perplexity interface
+        self.institutional_tracker = institutional_tracker # Store institutional tracker
         self.prompts_path = config.PROMPTS_PATH
         log.info("AIServiceProcessor initialized.")
         if not self.perplexity:
             log.warning("PerplexityInterface not provided to AIServiceProcessor. Market research insights will be unavailable.")
+        if not self.institutional_tracker:
+            log.warning("InstitutionalTracker not provided to AIServiceProcessor. Whale following signals will be unavailable.")
 
     def _load_prompt(self, prompt_name: str) -> str:
         """Loads a prompt template from the configured prompts directory."""
@@ -58,15 +63,46 @@ class AIServiceProcessor:
             log.error(f"Error loading prompt file {prompt_filepath}: {e}", exc_info=True)
             raise ConfigError(f"Failed to load prompt {prompt_filepath}: {e}") from e
 
+    def _load_whale_config(self) -> Dict[str, Any]:
+        """Loads whale tracking configuration for AI decision weighting."""
+        whale_config_path = os.path.join(config.PROJECT_ROOT, 'config', 'whale_tracking.json')
+        try:
+            if os.path.exists(whale_config_path):
+                with open(whale_config_path, 'r', encoding='utf-8') as f:
+                    whale_config = json.load(f)
+                log.debug(f"Loaded whale configuration with {len(whale_config.get('whales', {}))} tiers")
+                return whale_config
+            else:
+                log.warning("Whale configuration file not found - using default behavior")
+                return {}
+        except Exception as e:
+            log.error(f"Error loading whale configuration: {e}", exc_info=True)
+            return {}
+
+    def _get_whale_tier_info(self, institutions: List[str], whale_config: Dict[str, Any]) -> str:
+        """Get whale tier information for institutions to show priority level."""
+        if not whale_config.get('whales'):
+            return "Tier: Unknown"
+            
+        for tier_name, tier_data in whale_config['whales'].items():
+            if 'institutions' in tier_data:
+                for inst_config in tier_data['institutions']:
+                    if inst_config['name'] in institutions:
+                        priority = inst_config.get('priority', 'UNKNOWN')
+                        aum = inst_config.get('aum', 'Unknown')
+                        return f"Tier: {tier_name.replace('_', ' ').title()} | Priority: {priority} | AUM: ${aum}"
+        return "Tier: Untracked"
+
     def _format_input_data(
         self,
         prompt_template: str,
         market_data: MarketDataSnapshot,
         portfolio: Portfolio,
         recent_history: Optional[List[MemoryEntry]] = None, # Example history
-        perplexity_insights: Optional[str] = None # Add perplexity insights
+        perplexity_insights: Optional[str] = None, # Add perplexity insights
+        institutional_signals: Optional[List[Dict[str, Any]]] = None # Add institutional signals
     ) -> str:
-        """Formats the input data, including optional Perplexity insights, into the prompt string."""
+        """Formats the input data, including optional Perplexity insights and institutional signals, into the prompt string."""
         # This needs careful implementation based on the specific prompt structure.
         # Convert complex objects (like market data, portfolio) into a concise
         # text or JSON representation suitable for the LLM.
@@ -89,6 +125,30 @@ class AIServiceProcessor:
         # Prepare perplexity insights string for formatting
         perplexity_summary = perplexity_insights if perplexity_insights else "No market research insights available from Perplexity."
 
+        # Load whale configuration for enhanced analysis
+        whale_config = self._load_whale_config()
+        
+        # Prepare institutional signals summary with whale tier weighting
+        institutional_summary = "No institutional signals available."
+        if institutional_signals:
+            signal_lines = []
+            for signal in institutional_signals[:5]:  # Limit to top 5 signals
+                # Add whale tier information if available
+                institutions = signal.get('key_institutions', [])
+                tier_info = self._get_whale_tier_info(institutions, whale_config)
+                
+                signal_lines.append(f"- {signal.get('symbol', 'N/A')}: {signal.get('action', 'N/A')} signal from {', '.join(institutions)}")
+                signal_lines.append(f"  {tier_info} | Confidence: {signal.get('confidence', 0):.0%} | {signal.get('ai_summary', 'No details')}")
+            institutional_summary = "\n".join(signal_lines)
+            
+        # Add manual high-conviction picks from whale config
+        high_conviction_summary = "No manual high-conviction picks configured."
+        if whale_config.get('manual_high_conviction', {}).get('symbols'):
+            conviction_lines = []
+            for pick in whale_config['manual_high_conviction']['symbols']:
+                conviction_lines.append(f"- {pick['symbol']}: {pick['reason']} (AI trend weight: {pick['weight']*100:.0f}%)")
+            high_conviction_summary = "\n".join(conviction_lines)
+
         # Replace placeholders in the template
         try:
             formatted_prompt = prompt_template.format(
@@ -98,7 +158,9 @@ class AIServiceProcessor:
                 positions_json=positions_summary,
                 recent_history_summary=history_summary,
                 target_symbols=", ".join(config.DEFAULT_SYMBOLS), # Example: provide target symbols
-                perplexity_insights=perplexity_summary # Add perplexity insights placeholder
+                perplexity_insights=perplexity_summary, # Add perplexity insights placeholder
+                institutional_signals=institutional_summary, # Add institutional signals placeholder
+                high_conviction_picks=high_conviction_summary # Add high-conviction picks
                 # Add other relevant context variables here
             )
             return formatted_prompt
@@ -131,10 +193,12 @@ class AIServiceProcessor:
                 log.warning(f"Invalid signal action '{action_str}' in LLM response.")
                 return None
 
-            # Only create BUY/SELL signals, treat others (like HOLD) as None for now
-            if action not in [SignalAction.BUY, SignalAction.SELL]:
-                 log.info(f"LLM recommended action '{action.value}' for {symbol}. No trade signal generated.")
-                 # Could generate a 'HOLD' memory entry if needed
+            # Handle different signal actions appropriately
+            if action == SignalAction.HOLD:
+                 log.info(f"LLM recommended HOLD for {symbol}. Creating signal for tracking but no trade execution.")
+                 # Create HOLD signal for memory tracking and analysis purposes
+            elif action not in [SignalAction.BUY, SignalAction.SELL, SignalAction.HOLD, SignalAction.CLOSE_LONG, SignalAction.CLOSE_SHORT]:
+                 log.warning(f"Unexpected signal action '{action.value}' for {symbol}. No trade signal generated.")
                  return None
 
             # Validate confidence (optional but recommended)
@@ -244,6 +308,27 @@ class AIServiceProcessor:
             else:
                 log.info("Perplexity interface not available or API key not set. Skipping market research query.")
 
+            # 2.5. Get Institutional Signals (Optional)
+            institutional_signals = None
+            if self.institutional_tracker:
+                log.info("Fetching recent institutional signals for whale following analysis.")
+                try:
+                    institutional_signals = self.institutional_tracker.get_recent_institutional_signals(
+                        symbols=config.DEFAULT_SYMBOLS,
+                        hours_back=168  # Get signals from past week
+                    )
+                    if institutional_signals:
+                        log.info(f"Retrieved {len(institutional_signals)} institutional signals.")
+                        analysis_memory_payload["institutional_signals_count"] = len(institutional_signals)
+                        analysis_memory_payload["institutional_signals"] = institutional_signals
+                    else:
+                        log.info("No recent institutional signals found.")
+                        analysis_memory_payload["institutional_signals_count"] = 0
+                except Exception as i_err:
+                    log.error(f"Error fetching institutional signals: {i_err}", exc_info=True)
+                    analysis_memory_payload["institutional_error"] = str(i_err)
+            else:
+                log.info("InstitutionalTracker not available. Skipping whale following analysis.")
 
             # 3. Format Input Data (Fetch history if needed by the prompt)
             # TODO: Implement fetching relevant history from MemoryStorage based on prompt requirements
@@ -253,7 +338,8 @@ class AIServiceProcessor:
                 market_data,
                 portfolio,
                 recent_history,
-                perplexity_response # Pass insights to formatter
+                perplexity_response, # Pass insights to formatter
+                institutional_signals # Pass institutional signals to formatter
             )
             analysis_memory_payload["prompt_sent"] = formatted_prompt # Store the actual prompt sent
 
@@ -304,8 +390,6 @@ class AIServiceProcessor:
             )
             try:
                  self.memory_storage.save_memory(error_entry)
-            except MemoryServiceError as mem_err:
-                 log.error(f"Failed to save AI service error memory entry: {mem_err}")
             except MemoryServiceError as mem_err:
                  log.error(f"Failed to save AI service error memory entry: {mem_err}")
             # Still return the signal if it was generated, even if saving failed
