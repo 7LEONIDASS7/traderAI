@@ -54,6 +54,10 @@ class ExecutionServiceManager:
                 payload=portfolio_payload
             )
             self.memory.save_memory(memory_entry)
+            
+            # Update P/L for pending trades
+            self._update_pending_trades_pnl(self._current_portfolio)
+            
             return self._current_portfolio
         except BrokerageError as e:
             log.error(f"Failed to update portfolio state from brokerage: {e}", exc_info=True)
@@ -78,6 +82,142 @@ class ExecutionServiceManager:
         if force_refresh or not self._current_portfolio:
             return self.update_portfolio_state()
         return self._current_portfolio
+
+    def _get_prompt_attribution(self, signal: TradingSignal) -> Dict[str, Any]:
+        """Get prompt attribution from the signal's originating analysis entry."""
+        attribution = {"prompt_name": "unknown", "model_used": "unknown"}
+        
+        if not signal.originating_memory_id:
+            log.warning(f"Signal {signal.signal_id} has no originating_memory_id for prompt attribution")
+            return attribution
+            
+        try:
+            # Query memory storage to find the originating analysis entry
+            # We'll look for entries by content keywords including the memory ID
+            results = self.memory.query_memories(
+                content_keywords=[signal.originating_memory_id],
+                max_results=1
+            )
+            
+            if results:
+                filename, parsed_info = results[0]
+                try:
+                    analysis_entry = self.memory.read_memory("cur", filename)
+                    if analysis_entry.payload:
+                        attribution["prompt_name"] = analysis_entry.payload.get("prompt_name", "unknown")
+                        attribution["model_used"] = analysis_entry.payload.get("model_used", "unknown")
+                        log.debug(f"Retrieved prompt attribution for signal {signal.signal_id}: {attribution}")
+                except Exception as e:
+                    log.warning(f"Failed to read analysis entry for prompt attribution: {e}")
+            else:
+                log.warning(f"Could not find originating analysis entry for signal {signal.signal_id}")
+                
+        except Exception as e:
+            log.error(f"Error retrieving prompt attribution for signal {signal.signal_id}: {e}")
+            
+        return attribution
+
+    def _calculate_trade_pnl(self, symbol: str, side: OrderSide, entry_price: float, exit_price: float, quantity: float) -> Dict[str, Any]:
+        """Calculate profit/loss and win/loss classification for a trade."""
+        try:
+            # Calculate P/L based on trade direction
+            if side == OrderSide.BUY:
+                # For long positions: P/L = (exit_price - entry_price) * quantity
+                pnl = (exit_price - entry_price) * quantity
+            else:  # OrderSide.SELL (short position)
+                # For short positions: P/L = (entry_price - exit_price) * quantity
+                pnl = (entry_price - exit_price) * quantity
+            
+            # Classify as win/loss
+            is_win = pnl > 0
+            win_loss = "win" if is_win else "loss" if pnl < 0 else "breakeven"
+            
+            # Calculate percentage return
+            pnl_percent = (pnl / (entry_price * quantity)) * 100 if entry_price > 0 else 0
+            
+            return {
+                "profit_loss": round(pnl, 2),
+                "profit_loss_percent": round(pnl_percent, 2),
+                "win_loss": win_loss,
+                "is_win": is_win,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "quantity": quantity,
+                "trade_value": round(entry_price * quantity, 2)
+            }
+            
+        except Exception as e:
+            log.error(f"Error calculating P/L for {symbol}: {e}")
+            return {
+                "profit_loss": 0.0,
+                "profit_loss_percent": 0.0,
+                "win_loss": "unknown",
+                "is_win": False,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "quantity": quantity,
+                "trade_value": 0.0,
+                "calculation_error": str(e)
+            }
+
+    def _update_pending_trades_pnl(self, portfolio: Portfolio) -> None:
+        """Update P/L for pending trades based on current portfolio positions."""
+        try:
+            # Query for pending trades (ORDER_STATUS entries with trade_completed = false)
+            results = self.memory.query_memories(
+                content_keywords=["pending", "trade_completed"],
+                max_results=50  # Limit to recent trades
+            )
+            
+            updated_count = 0
+            for filename, parsed_info in results:
+                try:
+                    trade_entry = self.memory.read_memory("cur", filename)
+                    if (trade_entry.entry_type == MemoryEntryType.ORDER_STATUS and 
+                        trade_entry.payload.get("trade_completed") == False):
+                        
+                        symbol = trade_entry.payload.get("symbol")
+                        broker_order_id = trade_entry.payload.get("broker_order_id")
+                        
+                        if symbol and symbol in portfolio.positions:
+                            position = portfolio.positions[symbol]
+                            if position.current_price and trade_entry.payload.get("expected_entry_price"):
+                                # Calculate P/L using current position data
+                                entry_price = position.avg_entry_price or trade_entry.payload.get("expected_entry_price")
+                                if isinstance(entry_price, str):
+                                    continue  # Skip if price is still "market_price"
+                                
+                                quantity = trade_entry.payload.get("qty", 0)
+                                side_str = trade_entry.payload.get("side", "")
+                                
+                                if entry_price and quantity and side_str:
+                                    side = OrderSide.BUY if side_str.lower() == "buy" else OrderSide.SELL
+                                    pnl_data = self._calculate_trade_pnl(
+                                        symbol, side, entry_price, position.current_price, quantity
+                                    )
+                                    
+                                    # Update the trade entry with P/L data
+                                    trade_entry.payload.update(pnl_data)
+                                    trade_entry.payload["trade_completed"] = True
+                                    trade_entry.payload["pnl_update_timestamp"] = datetime.now(timezone.utc).isoformat()
+                                    
+                                    # Save updated entry (overwrite existing)
+                                    temp_filename = self.memory.save_memory(trade_entry)
+                                    # Move from new to cur with updated data
+                                    self.memory.move_memory("new", temp_filename, "cur", add_flags="P")  # P for Processed
+                                    updated_count += 1
+                                    
+                                    log.debug(f"Updated P/L for trade {broker_order_id}: {symbol} P/L=${pnl_data['profit_loss']}")
+                        
+                except Exception as e:
+                    log.warning(f"Error updating P/L for trade entry {filename}: {e}")
+                    continue
+            
+            if updated_count > 0:
+                log.info(f"Updated P/L for {updated_count} pending trades")
+                
+        except Exception as e:
+            log.error(f"Error updating pending trades P/L: {e}")
 
     def _calculate_order_qty(self, signal: TradingSignal, portfolio: Portfolio) -> float:
         """Calculates the quantity for an order based on signal and risk parameters."""
@@ -240,7 +380,16 @@ class ExecutionServiceManager:
         """
         log.info(f"Processing signal ID {signal.signal_id}: {signal.action.value} {signal.symbol}")
         order_to_submit: Optional[Order] = None
-        order_payload: Dict[str, Any] = {"signal_id": signal.signal_id} # For memory entry
+        
+        # Get prompt attribution for performance tracking
+        prompt_attribution = self._get_prompt_attribution(signal)
+        order_payload: Dict[str, Any] = {
+            "signal_id": signal.signal_id,
+            "prompt_name": prompt_attribution["prompt_name"],
+            "model_used": prompt_attribution["model_used"],
+            "signal_action": signal.action.value,
+            "signal_confidence": signal.confidence
+        } # For memory entry
 
         try:
             # 1. Get Current Portfolio State (Refresh only if stale)
@@ -281,9 +430,23 @@ class ExecutionServiceManager:
                 submitted_order = self.brokerage.submit_order(order_to_submit)
                 end_time = time.time()
                 latency = (end_time - start_time) * 1000 # Latency in ms
-                order_payload["submission_latency_ms"] = latency
-                order_payload["broker_order_id"] = submitted_order.id
-                order_payload["status"] = submitted_order.status.value
+                
+                # Capture trade entry data for P/L calculation
+                order_payload.update({
+                    "submission_latency_ms": latency,
+                    "broker_order_id": submitted_order.id,
+                    "status": submitted_order.status.value,
+                    "entry_timestamp": datetime.now(timezone.utc).isoformat(),
+                    "expected_entry_price": order_to_submit.limit_price or "market_price",
+                    "stop_loss_price": signal.stop_loss_price,
+                    "target_price": signal.target_price,
+                    # P/L fields - will be updated when trade completes
+                    "actual_fill_price": None,
+                    "profit_loss": None,
+                    "win_loss": "pending",
+                    "is_win": None,
+                    "trade_completed": False
+                })
                 log.info(f"Order submission latency for {signal.symbol}: {latency:.2f} ms")
 
                 # Save order submission attempt to memory

@@ -20,6 +20,27 @@ NEW_DIR = "new"
 CUR_DIR = "cur"
 INDEX_DIR = "index" # Optional index directory within cur
 
+# Allowed flags for memory file tagging - core system flags
+CORE_ALLOWED_FLAGS = {
+    # Basic system flags
+    "S",  # Seen
+    "T",  # Tagged
+    "P",  # Processed
+    "I",  # Important
+    "A",  # Archived
+    "E",  # Error
+    # Status flags
+    "Status_Filled", "Status_Rejected", "Status_Error", "Status_Success",
+    # Action flags  
+    "Action_Buy", "Action_Sell", "Action_Hold",
+    # Sentiment flags
+    "Sentiment_Positive", "Sentiment_Negative", "Sentiment_Neutral",
+    # Risk flags
+    "Risk_High", "Risk_Low",
+    # Entry type flags (basic ones)
+    "Flag_ANALYSIS", "Flag_SIGNAL", "Flag_TRADE", "Flag_ERROR", "Flag_PORTFOLIO_UPDATE"
+}
+
 # Filename format: <timestamp_ns>.<unique_id>.<hostname>[:2,<flags>]
 # Flags are Maildir-style (e.g., :2,S for Seen). The :2, part is optional if no flags.
 # Updated regex to allow more characters in flags (word chars, hyphen, comma)
@@ -55,46 +76,113 @@ class MemoryStorage:
         
         log.info(f"MemoryStorage initialized. Memdir root: {self.memdir_root}")
 
+    def _validate_flags(self, flags_to_check: str, operation: str = "update") -> None:
+        """
+        Validates that flags are allowed and logs warnings for invalid ones.
+        
+        Args:
+            flags_to_check: String of flags to validate
+            operation: Description of the operation for logging context
+            
+        Raises:
+            MemdirIOError: If any flag is invalid and strict validation is enabled
+        """
+        if not flags_to_check:
+            return
+            
+        invalid_flags = []
+        for flag in flags_to_check:
+            # Allow Symbol_ prefixed flags (dynamic symbols) and check core flags
+            if flag not in CORE_ALLOWED_FLAGS and not flag.startswith("Symbol_"):
+                invalid_flags.append(flag)
+        
+        if invalid_flags:
+            error_msg = f"Invalid flags detected during {operation}: {invalid_flags}. Allowed: core flags + Symbol_* patterns"
+            log.warning(error_msg)
+            # For now, log warning but don't raise error to maintain compatibility
+            # In future, could add strict mode: raise MemdirIOError(error_msg)
+
     def _load_indexes(self):
         """Load or initialize the indexing system for faster queries."""
+        metadata_loaded = False
+        content_loaded = False
+        
         try:
             # Load metadata index (filename -> parsed info)
             if self.metadata_index_file.exists():
                 with open(self.metadata_index_file, 'r') as f:
                     self.metadata_index = json.load(f)
                 log.debug(f"Loaded metadata index with {len(self.metadata_index)} entries")
+                metadata_loaded = True
             else:
                 self.metadata_index = {}
-                log.debug("Initialized empty metadata index")
+                log.debug("Initialized empty metadata index (file not found)")
                 
+        except (json.JSONDecodeError, PermissionError, OSError) as e:
+            log.error(f"Failed to load metadata index from {self.metadata_index_file}: {e.__class__.__name__}: {e}")
+            log.warning("Falling back to empty metadata index - performance may be degraded")
+            self.metadata_index = {}
+        except Exception as e:
+            log.error(f"Unexpected error loading metadata index: {e}", exc_info=True)
+            self.metadata_index = {}
+
+        try:
             # Load content index (keyword -> list of filenames)  
             if self.content_index_file.exists():
                 with open(self.content_index_file, 'r') as f:
                     self.content_index = json.load(f)
                 log.debug(f"Loaded content index with {len(self.content_index)} keywords")
+                content_loaded = True
             else:
                 self.content_index = {}
-                log.debug("Initialized empty content index")
+                log.debug("Initialized empty content index (file not found)")
                 
-        except Exception as e:
-            log.warning(f"Failed to load indexes, initializing empty: {e}")
-            self.metadata_index = {}
+        except (json.JSONDecodeError, PermissionError, OSError) as e:
+            log.error(f"Failed to load content index from {self.content_index_file}: {e.__class__.__name__}: {e}")
+            log.warning("Falling back to empty content index - keyword search will be slower")
             self.content_index = {}
+        except Exception as e:
+            log.error(f"Unexpected error loading content index: {e}", exc_info=True)
+            self.content_index = {}
+            
+        # Log overall index loading status
+        if not metadata_loaded or not content_loaded:
+            log.warning(f"Index loading incomplete - metadata: {'✓' if metadata_loaded else '✗'}, content: {'✓' if content_loaded else '✗'}. System will rebuild indexes as files are processed.")
 
     def _save_indexes(self):
         """Save indexes to disk for persistence."""
+        metadata_saved = False
+        content_saved = False
+        
         try:
             # Save metadata index
             with open(self.metadata_index_file, 'w') as f:
                 json.dump(self.metadata_index, f, default=str)
+            metadata_saved = True
+            log.debug(f"Saved metadata index with {len(self.metadata_index)} entries")
                 
+        except (PermissionError, OSError) as e:
+            log.error(f"Failed to save metadata index to {self.metadata_index_file}: {e.__class__.__name__}: {e}")
+        except Exception as e:
+            log.error(f"Unexpected error saving metadata index: {e}", exc_info=True)
+
+        try:
             # Save content index  
             with open(self.content_index_file, 'w') as f:
                 json.dump(self.content_index, f)
+            content_saved = True
+            log.debug(f"Saved content index with {len(self.content_index)} keywords")
                 
-            log.debug("Saved memory indexes to disk")
+        except (PermissionError, OSError) as e:
+            log.error(f"Failed to save content index to {self.content_index_file}: {e.__class__.__name__}: {e}")
         except Exception as e:
-            log.warning(f"Failed to save indexes: {e}")
+            log.error(f"Unexpected error saving content index: {e}", exc_info=True)
+            
+        # Log overall save status
+        if metadata_saved and content_saved:
+            log.debug("Successfully saved all memory indexes to disk")
+        else:
+            log.warning(f"Index saving incomplete - metadata: {'✓' if metadata_saved else '✗'}, content: {'✓' if content_saved else '✗'}. Indexes may be out of sync.")
 
     def _update_indexes(self, filename: str, entry: MemoryEntry, remove: bool = False):
         """Update indexes when files are added/removed."""
@@ -315,9 +403,13 @@ class MemoryStorage:
             raise MemdirIOError(f"Cannot update flags: Failed to parse filename {filename}")
 
         current_flags = set(parsed.get("flags", ""))
+        
+        # Validate flags before applying changes
         if add_flags:
+            self._validate_flags(add_flags, f"add_flags for {filename}")
             current_flags.update(add_flags)
         if remove_flags:
+            self._validate_flags(remove_flags, f"remove_flags for {filename}")
             current_flags.difference_update(remove_flags)
 
         new_flags_str = "".join(sorted(list(current_flags))) # Keep flags sorted
@@ -653,6 +745,193 @@ class MemoryStorage:
         except Exception as e:
              log.error(f"Unexpected error during memory pruning: {e}", exc_info=True)
              return 0, 0
+
+    def get_performance_metrics(self, prompt_name: str, days_back: int = 30) -> Dict[str, Any]:
+        """
+        Aggregate performance metrics for a specific prompt over a time period.
+        
+        Args:
+            prompt_name: The prompt name to filter metrics for
+            days_back: Number of days to look back for data
+            
+        Returns:
+            Dictionary containing aggregated performance metrics
+        """
+        from datetime import datetime, timedelta, timezone
+        
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(days=days_back)
+        
+        try:
+            # Initialize metrics
+            metrics = {
+                "prompt_name": prompt_name,
+                "period_days": days_back,
+                "start_date": start_time.isoformat(),
+                "end_date": end_time.isoformat(),
+                "signals_generated": 0,
+                "trades_executed": 0,
+                "trades_completed": 0,
+                "total_profit_loss": 0.0,
+                "avg_profit_loss": 0.0,
+                "win_count": 0,
+                "loss_count": 0,
+                "win_rate": 0.0,
+                "error_count": 0,
+                "error_types": {},
+                "symbols_traded": set(),
+                "total_trade_value": 0.0
+            }
+            
+            # Query for entries with the prompt name in the specified time range
+            results = self.query_memories(
+                time_start=start_time,
+                time_end=end_time,
+                content_keywords=[prompt_name],
+                max_results=1000  # Reasonable limit
+            )
+            
+            log.debug(f"Found {len(results)} memory entries for prompt '{prompt_name}' analysis")
+            
+            for filename, parsed_info in results:
+                try:
+                    entry = self.read_memory(CUR_DIR, filename)
+                    
+                    # Count analysis entries (signals generated)
+                    if entry.entry_type == MemoryEntryType.ANALYSIS:
+                        payload = entry.payload or {}
+                        if payload.get("prompt_name") == prompt_name:
+                            metrics["signals_generated"] += 1
+                            
+                            # Check if signal was generated
+                            generated_signal = payload.get("generated_signal")
+                            if generated_signal and generated_signal.get("action") != "hold":
+                                symbol = generated_signal.get("symbol")
+                                if symbol:
+                                    metrics["symbols_traded"].add(symbol)
+                    
+                    # Count trade executions and P/L
+                    elif entry.entry_type == MemoryEntryType.ORDER_STATUS:
+                        payload = entry.payload or {}
+                        if payload.get("prompt_name") == prompt_name:
+                            metrics["trades_executed"] += 1
+                            
+                            # If trade is completed, include P/L metrics
+                            if payload.get("trade_completed") == True:
+                                metrics["trades_completed"] += 1
+                                
+                                pnl = payload.get("profit_loss", 0)
+                                if pnl is not None:
+                                    metrics["total_profit_loss"] += pnl
+                                    
+                                    if payload.get("is_win") == True:
+                                        metrics["win_count"] += 1
+                                    elif payload.get("is_win") == False:
+                                        metrics["loss_count"] += 1
+                                
+                                trade_value = payload.get("trade_value", 0)
+                                if trade_value:
+                                    metrics["total_trade_value"] += trade_value
+                                    
+                                symbol = payload.get("symbol")
+                                if symbol:
+                                    metrics["symbols_traded"].add(symbol)
+                    
+                    # Count errors
+                    elif entry.entry_type == MemoryEntryType.ERROR:
+                        payload = entry.payload or {}
+                        if payload.get("prompt_name") == prompt_name:
+                            metrics["error_count"] += 1
+                            error_type = payload.get("error_type", "Unknown")
+                            metrics["error_types"][error_type] = metrics["error_types"].get(error_type, 0) + 1
+                            
+                except Exception as e:
+                    log.warning(f"Error processing entry {filename} for metrics: {e}")
+                    continue
+            
+            # Calculate derived metrics
+            if metrics["trades_completed"] > 0:
+                metrics["avg_profit_loss"] = metrics["total_profit_loss"] / metrics["trades_completed"]
+                total_completed = metrics["win_count"] + metrics["loss_count"]
+                if total_completed > 0:
+                    metrics["win_rate"] = (metrics["win_count"] / total_completed) * 100
+            
+            # Convert set to list for JSON serialization
+            metrics["symbols_traded"] = list(metrics["symbols_traded"])
+            
+            log.info(f"Performance metrics for '{prompt_name}': {metrics['signals_generated']} signals, "
+                    f"{metrics['trades_completed']} completed trades, {metrics['win_rate']:.1f}% win rate, "
+                    f"${metrics['total_profit_loss']:.2f} total P/L")
+            
+            return metrics
+            
+        except Exception as e:
+            log.error(f"Error calculating performance metrics for prompt '{prompt_name}': {e}", exc_info=True)
+            # Return empty metrics structure on error
+            return {
+                "prompt_name": prompt_name,
+                "period_days": days_back,
+                "error": str(e),
+                "signals_generated": 0,
+                "trades_executed": 0,
+                "trades_completed": 0,
+                "total_profit_loss": 0.0,
+                "avg_profit_loss": 0.0,
+                "win_count": 0,
+                "loss_count": 0,
+                "win_rate": 0.0,
+                "error_count": 0,
+                "error_types": {},
+                "symbols_traded": [],
+                "total_trade_value": 0.0
+            }
+
+    def get_prompt_performance_summary(self, days_back: int = 30) -> Dict[str, Dict[str, Any]]:
+        """
+        Get performance summary for all prompts used in the specified time period.
+        
+        Args:
+            days_back: Number of days to look back for data
+            
+        Returns:
+            Dictionary mapping prompt names to their performance metrics
+        """
+        from datetime import datetime, timedelta, timezone
+        
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(days=days_back)
+        
+        try:
+            # First, find all unique prompt names in the time period
+            prompt_names = set()
+            
+            results = self.query_memories(
+                time_start=start_time,
+                time_end=end_time,
+                max_results=1000
+            )
+            
+            for filename, parsed_info in results:
+                try:
+                    entry = self.read_memory(CUR_DIR, filename)
+                    if entry.payload and "prompt_name" in entry.payload:
+                        prompt_name = entry.payload["prompt_name"]
+                        if prompt_name and prompt_name != "unknown":
+                            prompt_names.add(prompt_name)
+                except Exception as e:
+                    continue
+            
+            # Get performance metrics for each prompt
+            summary = {}
+            for prompt_name in prompt_names:
+                summary[prompt_name] = self.get_performance_metrics(prompt_name, days_back)
+            
+            log.info(f"Generated performance summary for {len(summary)} prompts over {days_back} days")
+            return summary
+            
+        except Exception as e:
+            log.error(f"Error generating prompt performance summary: {e}", exc_info=True)
+            return {}
 
 # Example Usage (can be removed or moved to tests)
 # if __name__ == "__main__":

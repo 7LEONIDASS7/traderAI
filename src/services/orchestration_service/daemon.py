@@ -1,4 +1,5 @@
 import time
+import logging
 import schedule # Using schedule library for easier task scheduling
 import signal
 import sys
@@ -376,7 +377,9 @@ class OrchestrationDaemon:
             # Sleep for a short duration to avoid busy-waiting
             # Calculate sleep time based on next scheduled job and desired frequency check interval
             idle_time = schedule.idle_seconds()
-            sleep_interval = config.MAIN_LOOP_SLEEP_INTERVAL # Base sleep
+            base_interval = config.MAIN_LOOP_SLEEP_INTERVAL
+            sleep_interval = base_interval # Base sleep
+            
             if idle_time is not None and idle_time > 0:
                  # Sleep until the next job, but no more than the base interval
                  # to allow checking the trading frequency condition reasonably often.
@@ -385,7 +388,17 @@ class OrchestrationDaemon:
             # Ensure sleep interval is positive
             sleep_interval = max(0.1, sleep_interval)
 
-            # log.debug(f"Sleeping for {sleep_interval:.2f} seconds...")
+            # Enhanced debug logging for timing analysis
+            if log.isEnabledFor(logging.DEBUG):
+                idle_str = f"{idle_time:.2f}s" if idle_time is not None else "N/A"
+                next_job_time = "N/A"
+                if idle_time is not None and idle_time > 0:
+                    from datetime import datetime, timedelta
+                    next_job_time = (datetime.now() + timedelta(seconds=idle_time)).strftime("%H:%M:%S")
+                
+                log.debug(f"Main loop timing - Base interval: {base_interval:.2f}s, Idle time: {idle_str}, "
+                         f"Next job at: {next_job_time}, Computed sleep: {sleep_interval:.2f}s")
+            
             time.sleep(sleep_interval)
 
         log.info("Orchestration Daemon run loop finished.")
